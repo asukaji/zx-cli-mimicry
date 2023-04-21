@@ -1,0 +1,247 @@
+# Gitlab CI/CD 配置文件
+#
+# 配置帮助：https://gitlab.meitu.com/help/ci/yaml/README.md
+# 配置检查工具：https://gitlab.meitu.com/app/aigc/editor/-/ci/lint
+# 操作管线：https://gitlab.meitu.com/app/aigc/editor/pipelines
+# 环境管理：https://gitlab.meitu.com/app/aigc/editor/environments
+
+# 指定全局共用的 Docker 容器镜像
+# 如果不指定，在 Gitlab Runner 本地调试时，会报 ERROR: Preparation failed: no Docker image specified to run the build in 错误
+image: node:18-alpine
+
+# CI/CD 阶段
+stages:
+  - build # 构建阶段
+  - deploy # 部署阶段
+  - notify # 通知阶段
+
+# 构建基本配置
+.build:
+  stage: build
+  image: node:18-alpine
+  artifacts:
+    name: '$CI_COMMIT_REF_NAME-$CI_JOB_NAME-${CI_PIPELINE_ID}'
+    expire_in: 2 week
+    paths:
+      - build
+  variables:
+    REACT_APP_ENV: release
+  cache:
+    key: '$CI_COMMIT_REF_NAME-$CI_JOB_NAME'
+    paths:
+      - node_modules
+  before_script:
+    - echo $PWD
+    - uname -a
+    - node -v
+    - npm -v
+    - yarn --version
+    - apk add --no-cache bash
+    - ls -A
+    - echo $REACT_APP_ENV
+    - echo ${CI_PROJECT_NAME}-${CI_PIPELINE_ID}
+    - echo $CI_JOB_NAME
+    - echo $CI_PROJECT_DIR
+    - echo $CI_REPOSITORY_URL
+    - echo $CI_COMMIT_TAG
+    - echo $CI_COMMIT_REF_NAME
+    - ls -A
+    - npm set registry http://npm.meitu-int.com
+    - yarn install
+  after_script:
+    - echo $PWD
+    - ls -A
+    - node --eval "console.log(require('./package.json').version.split('-')[0])" > ./build/.version
+    - echo $REACT_APP_ENV > ./build/.env.deploy
+    - cat ./build/.env.deploy
+    - cat ./build/.version
+    - ls -A
+    - ls -A ./build
+  script:
+    - CI=false CI_COMMIT_SHA=$CI_COMMIT_SHA REACT_APP_ENV=$REACT_APP_ENV yarn build
+
+# 构建 Preview 环境配置
+build:pre:
+  stage: build
+  extends: .build # Gitlab Runner 本地调试时，不支持 extends 扩展，会无法继承配置
+  variables:
+    REACT_APP_ENV: pre
+  environment:
+    name: preview
+  only:
+    refs:
+      - develop
+
+# 构建 Beta 环境配置
+build:beta:
+  stage: build
+  extends: .build
+  variables:
+    REACT_APP_ENV: beta
+  environment:
+    name: beta
+  only:
+    refs:
+      - beta
+
+# 构建正式环境配置
+build:release:
+  stage: build
+  extends: .build
+  environment:
+    name: release
+  only:
+    refs:
+      - master
+
+# Gitlab Runner 本地调试测试任务
+# build:gitlab-runner-local-test:
+#   stage: build
+#   image: node:18-alpine
+#   # extends: .build # Gitlab Runner 本地调试时，不支持 extends 扩展，会无法继承配置，所以这边没有使用
+#   artifacts:
+#     name: '$CI_COMMIT_REF_NAME-$CI_JOB_NAME-${CI_PIPELINE_ID}'
+#     expire_in: 2 week
+#     paths:
+#       - dist
+#   variables:
+#     REACT_APP_ENV: pre
+#   cache:
+#     key: '$CI_COMMIT_REF_NAME-$CI_JOB_NAME'
+#     paths:
+#       - node_modules
+#   before_script:
+#     - echo $PWD
+#     - uname -a
+#     - node -v
+#     - npm -v
+#     - yarn --version
+#     - ls -A
+#     - echo $REACT_APP_ENV
+#     - echo ${CI_PROJECT_NAME}-${CI_PIPELINE_ID}
+#     - echo $CI_JOB_NAME
+#     - echo $CI_PROJECT_DIR
+#     - echo $CI_REPOSITORY_URL
+#     - echo $CI_COMMIT_TAG
+#     - echo $CI_COMMIT_REF_NAME
+#     - ls -A
+#     - npm set registry http://npm.meitu-int.com
+#     - yarn install
+#   script:
+#     - echo 1
+#     - REACT_APP_ENV=$REACT_APP_ENV yarn build
+#   after_script:
+#     - echo $PWD
+#     - ls -A
+#     - node --eval "console.log(require('./package.json').version.split('-')[0])" > ./build/.version
+#     - echo $REACT_APP_ENV > ./build/.env.deploy
+#     - cat ./build/.env.deploy
+#     - cat ./build/.version
+#     - ls -A
+#     - ls -A ./build
+
+# 部署基本配置
+.deploy:
+  stage: deploy
+  image: swr.cn-north-4.myhuaweicloud.com/gitlab-ci/publisher:latest
+  variables:
+    REACT_APP_ENV: release
+  before_script:
+    - echo $PWD
+    - uname -a
+    - echo "部署到 $REACT_APP_ENV 环境"
+    - ls -A
+    - ls -A ./build
+    - export IMAGE_DEFAULT_VERSION_NUMBER=$(cat ./build/.version)
+    - echo $IMAGE_DEFAULT_VERSION_NUMBER
+  script:
+    - publish.sh $REACT_APP_ENV
+
+# 部署 Preview 环境配置
+deploy:pre:
+  extends: .deploy
+  variables:
+    REACT_APP_ENV: pre
+  environment:
+    name: preview
+  dependencies:
+    - build:pre
+  only:
+    refs:
+      - develop
+
+# 部署 Beta 环境配置
+deploy:beta:
+  extends: .deploy
+  variables:
+    REACT_APP_ENV: beta
+  environment:
+    name: beta
+  dependencies:
+    - build:beta
+  only:
+    refs:
+      - beta
+
+# 部署正式环境配置
+deploy:release:
+  extends: .deploy
+  dependencies:
+    - build:release
+  environment:
+    name: release
+  only:
+    refs:
+      - master
+
+# 通知阶段基本配置
+.notify:
+  image: swr.cn-north-4.myhuaweicloud.com/gitlab-ci/notifier:latest
+  stage: notify
+  before_script:
+    - echo $PWD
+    - uname -a
+    - ls -A
+    - ls -A ./build
+    - export IMAGE_DEFAULT_VERSION_NUMBER=$(cat ./build/.version)
+    - echo $IMAGE_DEFAULT_VERSION_NUMBER
+  script:
+    - notify.sh $REACT_APP_ENV
+
+# 通知阶段 Preview 环境配置
+notify:pre:
+  extends: .notify
+  environment:
+    name: preview
+  variables:
+    REACT_APP_ENV: pre
+  only:
+    refs:
+      - develop
+  dependencies:
+    - build:pre
+    - deploy:pre
+
+# 通知阶段 Beta 环境配置
+notify:beta:
+  extends: .notify
+  environment:
+    name: beta
+  only:
+    refs:
+      - beta
+  dependencies:
+    - build:beta
+    - deploy:beta
+
+# 通知阶段正式环境配置
+notify:release:
+  extends: .notify
+  environment:
+    name: release
+  only:
+    refs:
+      - master
+  dependencies:
+    - build:release
+    - deploy:release
